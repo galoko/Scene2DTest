@@ -55,7 +55,7 @@ PS_INPUT VS(VS_INPUT input)
 
 float4 PS(PS_INPUT input) : SV_Target
 {
-    float4 Color = MainTexture.Sample(PointSampler, input.Tex);
+    float4 Color = MainTexture.Sample(SmoothSampler, input.Tex);
 
     return Color;
 }

@@ -187,8 +187,8 @@ void Form::Init(unsigned int Width, unsigned int Height, const WCHAR *WindowClas
 	// creating samplers
 	D3D11_SAMPLER_DESC SamplerDesc = {};
 	SamplerDesc.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
-	SamplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
-	SamplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+	SamplerDesc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+	SamplerDesc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
 	SamplerDesc.ComparisonFunc = D3D11_COMPARISON_NEVER;
 	SamplerDesc.MinLOD = 0;
 	SamplerDesc.MaxLOD = D3D11_FLOAT32_MAX;
@@ -257,6 +257,22 @@ void Form::Init(unsigned int Width, unsigned int Height, const WCHAR *WindowClas
 	DirectDeviceCtx->VSSetShader(VertexShader, 0, 0);
 	DirectDeviceCtx->PSSetShader(PixelShader, 0, 0);
 
+	D3D11_BLEND_DESC BlendStateDesc = {};
+
+	BlendStateDesc.RenderTarget[0].BlendEnable = TRUE;
+	BlendStateDesc.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+	BlendStateDesc.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+	BlendStateDesc.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+	BlendStateDesc.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+	BlendStateDesc.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+	BlendStateDesc.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+	BlendStateDesc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL; 
+
+	res = DirectDevice->CreateBlendState(&BlendStateDesc, &BlendState);
+	if (FAILED(res))
+		throw new runtime_error("Couldn't create blend state");
+	DirectDeviceCtx->OMSetBlendState(BlendState, NULL, 0xffffffff);
+
 	// register raw input
 
 	RAWINPUTDEVICE Rid[1] = {};
@@ -272,7 +288,7 @@ void Form::Init(unsigned int Width, unsigned int Height, const WCHAR *WindowClas
 	// setup matrices
 
 	AspectRatio = (double)Width / (double)Height;
-	ProjectionMatrix = XMMatrixPerspectiveFovLH((float)FOV, (float)AspectRatio, 0.1f, 1000.0f);
+	ProjectionMatrix = XMMatrixPerspectiveFovLH((float)FOV, (float)AspectRatio, 0.01f, 1000.0f);
 
 	// setup camera
 
@@ -280,12 +296,15 @@ void Form::Init(unsigned int Width, unsigned int Height, const WCHAR *WindowClas
 
 	CameraAngle = { (float)(M_PI / 2), (float)(M_PI / 2) };
 
+	CameraPosition.x = 0;
+	CameraPosition.y = 0;
+
 	BuildViewMatrix();
 	UpdatePersistentVertexVariables();
 
-	// setup planes
+	// load assets
 
-	GeneratePlanes();
+	LoadAssets();
 }
 
 // Window and Input events processing
@@ -350,7 +369,7 @@ void Form::ProcessKeyboardInput(double dt)
 	if (PressedKeys[VK_SPACE] || PressedKeys[VK_CONTROL])
 		Displacement += Up;
 
-	Displacement = XMVector3Normalize(Displacement) * (float)(MoveSpeed * dt);
+	Displacement = XMVector3Normalize(Displacement) * (float)(MoveSpeed * 0.01 * dt);
 
 	if (XMVector3LengthSq(Displacement).m128_f32[0] <= 0.0)
 		return;
@@ -358,6 +377,8 @@ void Form::ProcessKeyboardInput(double dt)
 	XMVECTOR Position = XMLoadFloat3(&CameraPosition);
 	Position += Displacement;
 	XMStoreFloat3(&CameraPosition, Position);
+
+	// CameraPosition.y = min(max((-2.5f) / 2, CameraPosition.y), (2.5f) / 2);
 
 	BuildViewMatrix();
 	UpdatePersistentVertexVariables();
@@ -478,43 +499,78 @@ void Form::UpdatePersistentVertexVariables(void)
 	DirectDeviceCtx->UpdateSubresource(PersistentVertexVariablesRef, 0, NULL, &PersistentVertexVariables, 0, 0);
 }
 
-void Form::GeneratePlanes(void)
+Asset* Form::LoadAsset(const WCHAR* Name, float Height, float Distance, bool Tile)
 {
+	// float X = (float)(1.0 / (AspectRatio * 2.0 * tan(FOV / 2.0)));
+
 	HRESULT res;
 
-	Vertex PlanesData[4];
-	
-	float X = (float)(1.0 / (AspectRatio * 2.0 * tan(FOV / 2.0)));
+	ID3D11Texture2D *Texture;
+	ID3D11ShaderResourceView *TextureView;
 
-	PlanesData[0].Pos = { X, -0.5f, -0.28125f };
-	PlanesData[1].Pos = { X,  0.5f, -0.28125f };
-	PlanesData[2].Pos = { X, -0.5f,  0.28125f };
-	PlanesData[3].Pos = { X,  0.5f,  0.28125f }; // suchara
+	res = CreateWICTextureFromFile(DirectDevice, (L"..\\data\\" + wstring(Name) + L"_src.png").c_str(), (ID3D11Resource**)&Texture, &TextureView);
+	if (FAILED(res))
+		throw new runtime_error("Couldn't load texture");
 
-	PlanesData[0].Tex = { 0, 1 };
-	PlanesData[1].Tex = { 1, 1 };
-	PlanesData[2].Tex = { 0, 0 };
-	PlanesData[3].Tex = { 1, 0 };
+	D3D11_TEXTURE2D_DESC TextureDesc;
+	Texture->GetDesc(&TextureDesc);
 
-	D3D11_SUBRESOURCE_DATA InitialData = { };
+	float Width = (float)TextureDesc.Width / (float)TextureDesc.Height * Height;
+
+	ID3D11Buffer *Vertices;
+
+	Vertex PlaneData[4];
+
+	float TileMul = Tile ? 1500 * Distance / Width : 1;
+
+	float Scale = 0.01f;
+
+	float HeightOffset = 0.0f; // 2.0f 
+
+	PlaneData[0].Pos = { (5 + Distance) * Scale, -0.5f * Width * TileMul * Scale,  (0.0f   - HeightOffset) * Scale };
+	PlaneData[1].Pos = { (5 + Distance) * Scale,  0.5f * Width * TileMul * Scale,  (0.0f   - HeightOffset) * Scale };
+	PlaneData[2].Pos = { (5 + Distance) * Scale, -0.5f * Width * TileMul * Scale,  (Height - HeightOffset) * Scale };
+	PlaneData[3].Pos = { (5 + Distance) * Scale,  0.5f * Width * TileMul * Scale,  (Height - HeightOffset) * Scale };
+
+	PlaneData[0].Tex = { 0 * TileMul, 1 };
+	PlaneData[1].Tex = { 1 * TileMul, 1 };
+	PlaneData[2].Tex = { 0 * TileMul, 0 };
+	PlaneData[3].Tex = { 1 * TileMul, 0 };
+
+	D3D11_SUBRESOURCE_DATA InitialData = {};
 
 	// creating buffers
 	D3D11_BUFFER_DESC VertexBufferDesc = {};
-	VertexBufferDesc.ByteWidth = sizeof(PlanesData);
+	VertexBufferDesc.ByteWidth = sizeof(PlaneData);
 	VertexBufferDesc.Usage = D3D11_USAGE_DEFAULT;
 	VertexBufferDesc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-	InitialData.pSysMem = PlanesData;
-	res = DirectDevice->CreateBuffer(&VertexBufferDesc, &InitialData, &PlanesBuffer);
+	InitialData.pSysMem = PlaneData;
+	res = DirectDevice->CreateBuffer(&VertexBufferDesc, &InitialData, &Vertices);
 	if (FAILED(res))
 		throw new runtime_error("Couldn't create vertex buffer");
 
-	VertexCount = sizeof(PlanesData) / sizeof(PlanesData[0]);
+	Asset *Result = (Asset*)_aligned_malloc(sizeof(Asset), 16);
+	memset(Result, 0, sizeof(Asset));
 
+	Result->Texture = Texture;
+	Result->TextureView = TextureView;
+	Result->Vertices = Vertices;
+	Result->WorldMatrix = XMMatrixIdentity();
+
+	Assets.push_back(Result);
+
+	return Result;
+}
+
+void Form::LoadAssets(void)
+{
 	CoInitialize(NULL);
 
-	res = CreateWICTextureFromFile(DirectDevice, L"..\\data\\background.jpg", (ID3D11Resource**)&Texture, &TextureView);
-	if (FAILED(res))
-		throw new runtime_error("Couldn't load texture");
+	LoadAsset(L"mountains", 7200.0f, 16000.0f, true);
+	LoadAsset(L"hill", 1.0f, 3.2f, true);
+	LoadAsset(L"tree", 3.0f, 3.0f, true);
+	Player = LoadAsset(L"man", 1.8f, 1.1f, false);
+	LoadAsset(L"grass", 0.2f, 1.0f, true);
 }
 
 void Form::WaitForNextFrame(void)
@@ -561,13 +617,21 @@ void Form::DrawScene(void)
 	DirectDeviceCtx->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
 	DirectDeviceCtx->OMSetDepthStencilState(DepthStencilState3D, 0);
 
-	DirectDeviceCtx->PSSetShaderResources(0, 1, &TextureView);
+	Player->WorldMatrix = XMMatrixAffineTransformation2D({ 1, 1, 1, 1 }, {}, 0, { 0, CameraPosition.y, 0, 1 });
 
-	UINT stride = sizeof(Vertex);
-	UINT offset = 0;
-	DirectDeviceCtx->IASetVertexBuffers(0, 1, &PlanesBuffer, &stride, &offset);
+	for (Asset* Asset : Assets) {
 
-	DirectDeviceCtx->Draw(VertexCount, 0);
+		WorldMatrix = Asset->WorldMatrix;
+		UpdateAllPerDrawVariables();
+
+		DirectDeviceCtx->PSSetShaderResources(0, 1, &Asset->TextureView);
+
+		UINT stride = sizeof(Vertex);
+		UINT offset = 0;
+		DirectDeviceCtx->IASetVertexBuffers(0, 1, &Asset->Vertices, &stride, &offset);
+
+		DirectDeviceCtx->Draw(4, 0);
+	}
 
 	if (SyncQuery != NULL)
 		DirectDeviceCtx->End(SyncQuery);

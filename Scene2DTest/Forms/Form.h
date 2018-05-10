@@ -6,6 +6,7 @@
 #include <string>
 #include <array>
 #include <stack>
+#include <vector>
 
 #include <d3d11.h>
 #include <DirectXMath.h>
@@ -16,6 +17,14 @@ using namespace std;
 struct Vertex {
 	XMFLOAT3 Pos;
 	XMFLOAT2 Tex;
+};
+
+class Asset {
+public:
+	ID3D11Buffer *Vertices;
+	ID3D11Texture2D *Texture;
+	ID3D11ShaderResourceView *TextureView;
+	XMMATRIX WorldMatrix;
 };
 
 class Form {
@@ -52,6 +61,8 @@ private:
 
 	ID3D11DepthStencilState *DepthStencilState3D;
 
+	ID3D11BlendState *BlendState;
+
 	XMMATRIX WorldMatrix;
 
 	XMMATRIX ViewMatrix;
@@ -85,13 +96,10 @@ private:
 	// for input lag reduction
 	ID3D11Query *SyncQuery;
 
-	// objects
+	// assets
 
-	ID3D11Buffer *PlanesBuffer;
-	uint32_t VertexCount;
-
-	ID3D11Texture2D *Texture;
-	ID3D11ShaderResourceView *TextureView;
+	Asset* Player;
+	vector<Asset*> Assets;
 
 	// GUI
 
@@ -131,7 +139,8 @@ private:
 	void BuildViewMatrix(void);
 	void UpdatePersistentVertexVariables(void);
 
-	void GeneratePlanes(void);
+	Asset* LoadAsset(const WCHAR* Name, float Height, float Distance, bool Tile);
+	void LoadAssets(void);
 
 	void DrawScene(void);
 public:
